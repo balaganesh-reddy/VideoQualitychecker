@@ -2,10 +2,9 @@ import { useCallback, useEffect, useState } from 'react';
 
 const LOOKUP_SHEET_ID = '1yBMqzh-yQ4UMj1YTAalmLQQdFo7fNCtgqCSDbwwt5eY';
 const LOOKUP_GID = '533897913';
-
-function normalize(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, '');
-}
+const cache = new Map<string, string | null>();
+let mappingPromise: Promise<Map<string, string>> | null = null;
+const normalize = (value: string) => value.trim().toUpperCase().replace(/\s+/g, '').replace(/_/g, '-');
 
 function extractGrid(json: string): string[][] {
   const start = json.indexOf('{');
@@ -16,50 +15,78 @@ function extractGrid(json: string): string[][] {
     (row.c ?? []).map((cell) => cell?.v == null ? '' : String(cell.v)),
   );
 }
+function headerKey(value: string) { return value.toLowerCase().replace(/[^a-z0-9]/g, ''); }
 
-/** Resolve an IC name from the configured Google Sheet by matching the IC number. */
-export async function lookupIcName(icNumber: string): Promise<string | null> {
-  if (!icNumber.trim()) return null;
-  const url = `https://docs.google.com/spreadsheets/d/${LOOKUP_SHEET_ID}/gviz/tq?tqx=out:json&gid=${LOOKUP_GID}`;
-  const response = await fetch(url);
-  if (!response.ok) throw new Error('Unable to read the IC lookup sheet. Check its sharing permissions.');
-  const rows = extractGrid(await response.text());
-  if (rows.length < 2) return null;
-
-  const headers = rows[0].map(normalize);
-  const numberColumn = headers.findIndex((header) => /^(icnumber|icno|icid|ic)$/.test(header));
-  const nameColumn = headers.findIndex((header) => /^(icname|name|nameofic)$/.test(header));
-  if (numberColumn < 0 || nameColumn < 0) {
-    throw new Error('IC lookup sheet needs recognizable IC Number and IC Name headers.');
-  }
-  const target = normalize(icNumber);
-  const match = rows.slice(1).find((row) => normalize(row[numberColumn] ?? '') === target);
-  return match?.[nameColumn]?.trim() || null;
+async function getMapping() {
+  if (mappingPromise) return mappingPromise;
+  mappingPromise = (async () => {
+    const configuredUrl = import.meta.env.VITE_IC_MAPPING_URL as string | undefined;
+    const url = configuredUrl || `https://docs.google.com/spreadsheets/d/${LOOKUP_SHEET_ID}/gviz/tq?tqx=out:json&gid=${LOOKUP_GID}`;
+    const response = await fetch(url);
+    if (!response.ok) throw new Error('Unable to read the IC lookup sheet. Check its sharing permissions or mapping endpoint.');
+    const rows = configuredUrl?.toLowerCase().includes('format=csv') || configuredUrl?.toLowerCase().endsWith('.csv')
+      ? (await response.text()).trim().split(/\r?\n/).map((line) => line.split(',').map((cell) => cell.replace(/^"|"$/g, '')))
+      : extractGrid(await response.text());
+    if (rows.length < 2) throw new Error('IC lookup sheet contains no mapping rows.');
+    const headers = rows[0].map(headerKey);
+    const numberColumn = headers.findIndex((header) => ['icnumber', 'icno', 'icid', 'ic'].includes(header));
+    const nameColumn = headers.findIndex((header) => ['icname', 'nameofic'].includes(header));
+    if (numberColumn < 0 || nameColumn < 0) throw new Error('IC lookup sheet needs recognizable IC Number and IC Name headers.');
+    const mappings = new Map<string, string>();
+    rows.slice(1).forEach((row) => {
+      const number = normalize(row[numberColumn] ?? '');
+      const name = (row[nameColumn] ?? '').trim();
+      if (number && name) mappings.set(number, name);
+    });
+    return mappings;
+  })().catch((error) => { mappingPromise = null; throw error; });
+  return mappingPromise;
 }
 
-/** Watches selected system log files and resolves an IC number/name pair. */
+export async function lookupIcName(icNumber: string): Promise<string | null> {
+  const target = normalize(icNumber);
+  if (!target) return null;
+  if (cache.has(target)) return cache.get(target) ?? null;
+  const mapping = await getMapping();
+  const name = mapping.get(target) ?? null;
+  cache.set(target, name);
+  return name;
+}
+
+/** Read logs from the currently selected card and resolve a verified IC number/name pair. */
 export function useIcLogLookup(logFiles: File[]) {
   const [icNumber, setIcNumber] = useState('');
   const [icName, setIcName] = useState('');
   const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
 
   const resolve = useCallback(async () => {
+    let number = '';
+    setIcNumber('');
+    setIcName('');
     setError('');
-    const log = logFiles.find((file) => /\.(log|txt|csv|json)$/i.test(file.name));
-    if (!log) return;
-    const contents = await log.text();
-    const match = contents.match(/\bIC\s*(?:Number|No\.?|ID)?\s*[:=,#-]?\s*(IC[-_ ]?\d+)\b/i)
-      ?? contents.match(/\b(IC[-_]\d+)\b/i);
-    if (!match) return;
-    const number = match[1].replace(/\s+/g, '').toUpperCase();
-    setIcNumber(number);
+    const logs = logFiles.filter((file) => /\.(log|txt|csv|json)$/i.test(file.name));
     try {
-      setIcName(await lookupIcName(number) ?? '');
+      for (const log of logs) {
+        const contents = await log.text();
+        const match = contents.match(/\bIC\s*(?:Number|No\.?|ID)?\s*[:=,#-]?\s*(IC[-_ ]?\d+)\b/i)
+          ?? contents.match(/\b(IC[-_]\d+)\b/i);
+        if (match) { number = normalize(match[1]); break; }
+      }
+      if (!number) {
+        if (logs.length) setError('IC number not found in system log.');
+        return;
+      }
+      setIcNumber(number);
+      setLoading(true);
+      const name = await lookupIcName(number);
+      if (name) setIcName(name);
+      else setError('IC mapping not found. Please verify the IC number.');
     } catch (lookupError) {
       setError(lookupError instanceof Error ? lookupError.message : 'IC lookup failed.');
-    }
+    } finally { setLoading(false); }
   }, [logFiles]);
 
   useEffect(() => { void resolve(); }, [resolve]);
-  return { icNumber, icName, error };
+  return { icNumber, icName, error, loading };
 }
