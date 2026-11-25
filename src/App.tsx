@@ -4,6 +4,7 @@ import { supabase } from '@/lib/supabase';
 import type { SdCardRecord, ValidationStatus } from '@/lib/supabase';
 import { pickSdCardDirectory, createVideoObjectUrl } from '@/lib/sdCardScanner';
 import type { DetectedFile } from '@/lib/sdCardScanner';
+import { useIcLogLookup } from '@/lib/icLookup';
 import VideoPlayer from '@/components/VideoPlayer';
 import SdCardDetails from '@/components/SdCardDetails';
 import { HardDrive, CheckCircle2, XCircle, MessageSquarePlus, Send, Search, Loader2, CircleDot, CheckCheck, AlertCircle, Usb, FolderOpen, RefreshCw, Info, FileText } from 'lucide-react';
@@ -35,7 +36,10 @@ export default function App() {
   const recordsRef = useRef(records);
   recordsRef.current = records;
   const playFileRef = useRef<(record: SdCardRecord) => void>(() => {});
+  const lastIcUpdate = useRef('');
   const selected = records.find((record) => record.id === selectedId) ?? null;
+  const logFiles = useMemo(() => detectedMetaFiles.filter((file) => /\.(log|txt|csv|json)$/i.test(file.name)).map((file) => file.file), [detectedMetaFiles]);
+  const { icNumber, icName, error: icLookupError } = useIcLogLookup(logFiles);
 
   const fetchRecords = useCallback(async () => {
     const { data, error } = await supabase.from('sd_card_records').select('*').order('created_at', { ascending: false });
@@ -47,6 +51,27 @@ export default function App() {
   useEffect(() => () => { if (videoUrl) URL.revokeObjectURL(videoUrl); }, [videoUrl]);
   useEffect(() => { if (!toast) return; const timer = setTimeout(() => setToast(null), 5000); return () => clearTimeout(timer); }, [toast]);
   useEffect(() => { setComment(selected?.comment ?? ''); }, [selectedId]);
+
+  // Log files on the inserted card provide the IC number; resolve and persist its name from the lookup sheet.
+  useEffect(() => {
+    if (!cardConnected || !icNumber || !icName) return;
+    const updateKey = `${cardConnected}:${icNumber}:${icName}`;
+    if (lastIcUpdate.current === updateKey) return;
+    lastIcUpdate.current = updateKey;
+    void (async () => {
+      const { error } = await supabase.from('sd_card_records').update({ ic_number: icNumber, ic_name: icName }).eq('sd_card_count', cardConnected);
+      if (error) {
+        lastIcUpdate.current = '';
+        setToast({ type: 'error', msg: 'IC was identified, but could not be saved to the card records.' });
+        return;
+      }
+      setRecords((previous) => previous.map((record) => record.sd_card_count === cardConnected ? { ...record, ic_number: icNumber, ic_name: icName } : record));
+      setToast({ type: 'success', msg: `IC ${icNumber} matched to ${icName}.` });
+    })();
+  }, [cardConnected, icNumber, icName]);
+  useEffect(() => {
+    if (icLookupError) setToast({ type: 'error', msg: icLookupError });
+  }, [icLookupError]);
 
   const importDetectedFiles = async (cardName: string, videos: DetectedFile[], metadata: DetectedFile[]) => {
     if (!videos.length && !metadata.length) return;
@@ -61,7 +86,7 @@ export default function App() {
       const now = new Date().toISOString().slice(0, 10);
       const rows = [
         ...newVideos.map((file) => ({ entry_date: now, recorded_date: now, recorded_time: '00:00:00', video_status: 'Detected from card', sd_card_count: cardName, video_url: file.path, source_file: file.name, status: 'pending' as const })),
-        ...newMetadata.map((file) => ({ entry_date: now, recorded_date: now, recorded_time: '00:00:00', mcap_files: file.name, video_status: 'Metadata file', sd_card_count: cardName, video_url: null, source_file: file.name, status: 'pending' as const })),
+        ...newMetadata.map((file) => ({ entry_date: now, recorded_date: now, recorded_time: '00:00:00', mcap_files: file.name, video_status: file.name.toLowerCase().endsWith('.mcap') ? 'MCAP data file' : 'Metadata file', sd_card_count: cardName, video_url: null, source_file: file.name, status: 'pending' as const })),
       ];
       const { error } = await supabase.from('sd_card_records').insert(rows);
       if (error) throw error;
@@ -134,9 +159,9 @@ export default function App() {
   const updateStatus = async (status: ValidationStatus) => {
     if (!selected) return;
     const newComment = status === 'passed_with_comment' ? comment : null;
-    const { error } = await supabase.from('sd_card_records').update({ status, comment: newComment }).eq('id', selected.id);
+    const { error } = await supabase.from('sd_card_records').update({ status, comment: newComment, vc_comment: newComment }).eq('id', selected.id);
     if (error) { setToast({ type: 'error', msg: 'Could not save validation status.' }); return; }
-    setRecords((previous) => previous.map((record) => record.id === selected.id ? { ...record, status, comment: newComment } : record));
+    setRecords((previous) => previous.map((record) => record.id === selected.id ? { ...record, status, comment: newComment, vc_comment: newComment } : record));
     setToast({ type: 'success', msg: `Validation set to ${STATUS_LABELS[status]}.` });
   };
 
@@ -157,7 +182,6 @@ export default function App() {
     finally { setSubmitting(false); }
   };
 
-  // Do not show historical cards while a different card is inserted/selected.
   const visibleRecords = useMemo(() => records.filter((record) => cardConnected && record.sd_card_count === cardConnected), [records, cardConnected]);
   const filtered = visibleRecords.filter((record) => [record.vc_name, record.ic_number, record.city, record.sd_card_count, record.project_ic_name, record.source_file].some((value) => value?.toLowerCase().includes(search.toLowerCase())));
   const pendingCount = visibleRecords.filter((record) => record.status === 'pending').length;
@@ -171,7 +195,7 @@ export default function App() {
           <div className="flex items-center gap-3"><div className="flex items-center justify-center w-10 h-10 rounded-lg bg-sky-600 text-white"><HardDrive className="w-5 h-5" /></div><div><h1 className="text-base font-bold text-neutral-900">SD Card Validation Dashboard</h1><p className="text-xs text-neutral-500">Detect card, review video and MCAP, validate, submit</p></div></div>
           <div className="flex items-center gap-3"><div className="hidden md:flex gap-3"><Stat label="Pending" value={pendingCount} /><Stat label="Validated" value={validatedCount} /><Stat label="Submitted" value={submittedCount} /></div><button onClick={() => void connectCard()} disabled={scanning || importing} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold bg-sky-600 text-white hover:bg-sky-700 disabled:opacity-50">{scanning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Usb className="w-4 h-4" />}{scanning ? 'Scanning…' : cardConnected ? 'Re-scan Card' : 'Connect SD Card'}</button></div>
         </div>
-        {cardConnected && <div className="px-6 py-1.5 bg-emerald-50 border-t border-emerald-100 text-xs text-emerald-800"><CheckCircle2 className="w-3.5 h-3.5 inline mr-2" /><b>Card connected:</b> {cardConnected} — {detectedFiles.length} video(s), {detectedMetaFiles.filter((file) => file.name.toLowerCase().endsWith('.mcap')).length} MCAP file(s){importing && ' · Importing…'}</div>}
+        {cardConnected && <div className="px-6 py-1.5 bg-emerald-50 border-t border-emerald-100 text-xs text-emerald-800"><CheckCircle2 className="w-3.5 h-3.5 inline mr-2" /><b>Card connected:</b> {cardConnected} — {detectedFiles.length} video(s), {detectedMetaFiles.filter((file) => file.name.toLowerCase().endsWith('.mcap')).length} MCAP file(s){importing && ' · Importing…'}{icNumber && ` · ${icNumber}${icName ? ` — ${icName}` : ''}`}</div>}
       </header>
       <div className="flex flex-1 min-h-0 flex-col lg:flex-row">
         <aside className="flex flex-col gap-4 p-4 w-full lg:w-80 shrink-0 border-b lg:border-b-0 lg:border-r border-neutral-200 bg-white max-h-[45vh] lg:max-h-none">
