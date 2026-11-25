@@ -1,0 +1,3 @@
+[functions.submit-to-sheet]
+verify_jwt = true
+entrypoint = "./functions/submit-to-sheet/index.ts"
