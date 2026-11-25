@@ -19,13 +19,17 @@ export interface SdCardRecord {
   video_status: string | null;
   city: string | null;
   project_ic_name: string | null;
+  ic_name: string | null;
   fo_name: string | null;
   sd_card_count: string | null;
   sd_card_duration: string | null;
   video_url: string | null;
+  drive_link: string | null;
   source_file: string | null;
   status: ValidationStatus;
   comment: string | null;
+  vc_comment: string | null;
+  ic_comment: string | null;
   submitted: boolean;
   created_at: string;
 }

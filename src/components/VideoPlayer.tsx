@@ -6,6 +6,8 @@ interface VideoPlayerProps {
   title?: string;
 }
 
+const PLAYBACK_RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4, 5, 6, 8, 10];
+
 function formatTime(seconds: number): string {
   if (!isFinite(seconds) || isNaN(seconds)) return '00:00:00';
   const h = Math.floor(seconds / 3600);
@@ -21,6 +23,7 @@ export default function VideoPlayer({ src, title }: VideoPlayerProps) {
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
   const [current, setCurrent] = useState(0);
+  const [playbackRate, setPlaybackRate] = useState(1);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -45,8 +48,7 @@ export default function VideoPlayer({ src, title }: VideoPlayerProps) {
     const video = videoRef.current;
     if (!video) return;
     if (video.paused) {
-      video.play();
-      setPlaying(true);
+      void video.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
     } else {
       video.pause();
       setPlaying(false);
@@ -64,14 +66,18 @@ export default function VideoPlayer({ src, title }: VideoPlayerProps) {
     const video = videoRef.current;
     if (!video) return;
     video.currentTime = 0;
-    video.play();
-    setPlaying(true);
+    void video.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
+  };
+
+  const changePlaybackRate = (rate: number) => {
+    const video = videoRef.current;
+    if (video) video.playbackRate = rate;
+    setPlaybackRate(rate);
   };
 
   const fullscreen = () => {
     const video = videoRef.current;
-    if (!video) return;
-    if (video.requestFullscreen) video.requestFullscreen();
+    if (video?.requestFullscreen) void video.requestFullscreen();
   };
 
   const seek = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -120,42 +126,36 @@ export default function VideoPlayer({ src, title }: VideoPlayerProps) {
             step={0.1}
             value={progress}
             onChange={seek}
+            aria-label="Seek video"
             className="flex-1 h-1.5 rounded-full appearance-none cursor-pointer bg-neutral-700 accent-sky-500"
-            style={{
-              background: `linear-gradient(to right, #0ea5e9 ${progress}%, #404040 ${progress}%)`,
-            }}
+            style={{ background: `linear-gradient(to right, #0ea5e9 ${progress}%, #404040 ${progress}%)` }}
           />
           <span className="text-xs font-mono text-neutral-400 tabular-nums w-20 text-right">{formatTime(duration)}</span>
         </div>
 
         <div className="flex items-center gap-2">
-          <button
-            onClick={togglePlay}
-            className="flex items-center justify-center w-9 h-9 rounded-lg bg-neutral-800 text-white hover:bg-sky-600 transition-colors"
-            aria-label={playing ? 'Pause' : 'Play'}
-          >
+          <button onClick={togglePlay} className="flex items-center justify-center w-9 h-9 rounded-lg bg-neutral-800 text-white hover:bg-sky-600 transition-colors" aria-label={playing ? 'Pause' : 'Play'}>
             {playing ? <Pause className="w-4 h-4" fill="currentColor" /> : <Play className="w-4 h-4 ml-0.5" fill="currentColor" />}
           </button>
-          <button
-            onClick={toggleMute}
-            className="flex items-center justify-center w-9 h-9 rounded-lg bg-neutral-800 text-white hover:bg-sky-600 transition-colors"
-            aria-label={muted ? 'Unmute' : 'Mute'}
-          >
+          <button onClick={toggleMute} className="flex items-center justify-center w-9 h-9 rounded-lg bg-neutral-800 text-white hover:bg-sky-600 transition-colors" aria-label={muted ? 'Unmute' : 'Mute'}>
             {muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
           </button>
-          <button
-            onClick={restart}
-            className="flex items-center justify-center w-9 h-9 rounded-lg bg-neutral-800 text-white hover:bg-sky-600 transition-colors"
-            aria-label="Restart"
-          >
+          <button onClick={restart} className="flex items-center justify-center w-9 h-9 rounded-lg bg-neutral-800 text-white hover:bg-sky-600 transition-colors" aria-label="Restart">
             <RotateCcw className="w-4 h-4" />
           </button>
+          <label className="ml-2 flex items-center gap-2 text-xs text-neutral-300">
+            <span>Speed</span>
+            <select
+              value={playbackRate}
+              onChange={(event) => changePlaybackRate(Number(event.target.value))}
+              className="rounded-md border border-neutral-700 bg-neutral-800 px-2 py-1.5 text-white focus:outline-none focus:ring-2 focus:ring-sky-500"
+              aria-label="Playback speed"
+            >
+              {PLAYBACK_RATES.map((rate) => <option key={rate} value={rate}>{rate}×</option>)}
+            </select>
+          </label>
           <div className="flex-1" />
-          <button
-            onClick={fullscreen}
-            className="flex items-center justify-center w-9 h-9 rounded-lg bg-neutral-800 text-white hover:bg-sky-600 transition-colors"
-            aria-label="Fullscreen"
-          >
+          <button onClick={fullscreen} className="flex items-center justify-center w-9 h-9 rounded-lg bg-neutral-800 text-white hover:bg-sky-600 transition-colors" aria-label="Fullscreen">
             <Maximize2 className="w-4 h-4" />
           </button>
         </div>
